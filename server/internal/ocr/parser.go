@@ -454,6 +454,16 @@ func Parse(rows []Row, settings map[string]string) *model.ParseResult {
 		fields["amount"] = *amount
 	}
 	if total != nil && tax != nil && amount != nil {
+		// 有些票（尤其截图 OCR）只认出「合计」行的金额，没有识别出「价税合计」，
+		// 此时合计金额等于不含税金额，真正的价税合计应为 金额 + 税额。
+		if total.Source != "label" && total.Source != "capital" {
+			av, xv, tv := toFloatAny(amount.Value), toFloatAny(tax.Value), toFloatAny(total.Value)
+			if absFloat(tv-av) < 0.005 && absFloat(av+xv-tv) > 0.02 {
+				total.Value = round2(av + xv)
+				total.Source = "sum"
+				fields["total"] = *total
+			}
+		}
 		tv := toFloatAny(total.Value)
 		diff := (toFloatAny(amount.Value) + toFloatAny(tax.Value)) - tv
 		if diff < 0 {
@@ -527,6 +537,10 @@ func maxF(a, b float64) float64 {
 }
 
 func round2(v float64) float64 {
+	// 负数不能用 +0.5 取整，否则 -2.65 会变成 -2.64（红冲行会踩到）。
+	if v < 0 {
+		return float64(int64(v*100-0.5)) / 100
+	}
 	return float64(int64(v*100+0.5)) / 100
 }
 
@@ -735,10 +749,15 @@ func findParty(texts []string, labels []string) (string, string, bool) {
 }
 
 func extractTotal(texts []string, flat string) *model.Field {
-	for _, re := range reTotal {
+	for i, re := range reTotal {
 		for _, t := range texts {
 			if m := re.FindStringSubmatch(t); m != nil {
-				return &model.Field{Value: parseMoney(m[1]), Confidence: 0.9, Source: "label"}
+				source := "label"
+				// 最后一档只是「合计」行（金额 + 税额分列），不是价税合计，单独标记便于兜底。
+				if i == len(reTotal)-1 {
+					source = "row"
+				}
+				return &model.Field{Value: parseMoney(m[1]), Confidence: 0.9, Source: source}
 			}
 		}
 	}
@@ -825,19 +844,85 @@ func extractItems(rows []Row) []model.Item {
 			}
 		}
 	}
-
 	if len(cols) < 2 {
 		return nil
 	}
 
-	var items []model.Item
+	var raw []model.Item
 	for _, row := range rows[headerIdx+1:] {
 		if isStopRow(row.Text) {
 			break
 		}
-		if item, ok := assignRow(row, cols); ok {
-			items = append(items, postItem(item))
+		name, spec, unit := "", "", ""
+		numbers := map[string]string{}
+		for _, run := range rowRuns(row) {
+			text := NormalizeLine(run.Text)
+			if text == "" {
+				continue
+			}
+			// 文字列左对齐，按左边界归列；数字右对齐，按中心归列。
+			probe := run.X
+			if looksNumeric(text) {
+				probe = run.center()
+			}
+			key, dist := nearestColumn(probe, cols)
+			if key == "" || dist > 200 {
+				continue
+			}
+			switch key {
+			case "name":
+				name = joinRunText(name, text)
+			case "spec":
+				spec = joinRunText(spec, text)
+			case "unit":
+				if unit == "" {
+					unit = text
+				}
+			default:
+				if isNumericKey(key) {
+					// 同一列可能被切成多个片段（如 qty 2 与 price 13.05 贴在一起），按顺序拼回。
+					numbers[key] += text
+				}
+			}
 		}
+		hasNumber := false
+		for _, v := range numbers {
+			if strings.TrimSpace(v) != "" {
+				hasNumber = true
+				break
+			}
+		}
+		if !hasNumber {
+			if len(raw) == 0 {
+				continue
+			}
+			// 没有数字的行是上一行名称/规格的换行续写。
+			last := &raw[len(raw)-1]
+			last.Name = joinRunText(last.Name, name)
+			last.Spec = joinRunText(last.Spec, spec)
+			if last.Unit == "" && unit != "" {
+				last.Unit = unit
+			}
+			continue
+		}
+		it := model.Item{Name: name, Spec: spec, Unit: unit}
+		for key, text := range numbers {
+			setItemNumber(&it, key, text)
+		}
+		if it.Name == "" && it.Amount == nil {
+			continue
+		}
+		raw = append(raw, it)
+	}
+
+	items := make([]model.Item, 0, len(raw))
+	for _, it := range raw {
+		it.Name = cleanItemName(it.Name)
+		it.Spec = strings.TrimSpace(reMultiSpace.ReplaceAllString(it.Spec, " "))
+		if it.Name == "" && it.Amount == nil {
+			continue
+		}
+		items = append(items, postItem(it))
 	}
 	return items
 }
@@ -881,64 +966,79 @@ func maxInt(a, b int) int {
 	return b
 }
 
-// 数值列：用 token 逐个归属，避免相邻数字被合并成一个单元格。
-func assignRow(row Row, cols map[string]float64) (model.Item, bool) {
-	if len(row.Cells) == 0 {
-		return model.Item{}, false
-	}
-	item := model.Item{}
-	var names, specs []string
-	needTokenNumeric := false
+// textRun 一行内相邻文字合并后的片段（PDF 文字层常按单字给出坐标）。
+type textRun struct {
+	Text string
+	X    float64
+	W    float64
+	H    float64
+}
 
-	for _, cell := range row.Cells {
-		key, dist := nearestColumn(cell.X, cols)
-		if key == "" || dist > 170 {
-			// 表头没认全时，远离任何已知列的内容多半是别的列，宁可不收也别拼进名称
+func (r textRun) center() float64 { return r.X + r.W/2 }
+
+// rowRuns 把一行内的 token 按视觉间隙合并成片段，字符级文本先还原成词。
+func rowRuns(row Row) []textRun {
+	tokens := append([]Token(nil), row.Tokens...)
+	if len(tokens) == 0 {
+		for _, c := range row.Cells {
+			tokens = append(tokens, Token{Text: c.Text, X: c.X, W: c.W, H: c.H})
+		}
+	}
+	sort.SliceStable(tokens, func(i, j int) bool { return tokens[i].X < tokens[j].X })
+	var runs []textRun
+	var cur textRun
+	for _, tk := range tokens {
+		if strings.TrimSpace(tk.Text) == "" {
 			continue
 		}
-		switch key {
-		case "name":
-			names = append(names, cell.Text)
-		case "spec":
-			specs = append(specs, cell.Text)
-		case "unit":
-			if item.Unit == "" {
-				item.Unit = cell.Text
-			}
-		default:
-			// PDF 文字层的数字经常与相邻列贴在一起，统一按 token 逐个分配；
-			// OCR 结果的单词已按视觉切分，只有明显塞了多个数字时才拆。
-			if row.Src == "pdf" && len(row.Tokens) > 1 {
-				needTokenNumeric = true
-				continue
-			}
-			if countNumberFragments(cell.Text) >= 2 && len(row.Tokens) > 1 {
-				needTokenNumeric = true
-				continue
-			}
-			setItemNumber(&item, key, cell.Text)
+		h := tokenHeight(tk)
+		if cur.Text == "" {
+			cur = textRun{Text: tk.Text, X: tk.X, W: tk.W, H: h}
+			continue
+		}
+		gap := tk.X - (cur.X + cur.W)
+		// 只合并同一单元格内紧挨着的字，列与列之间的空隙（通常 5px 以上）必须切开。
+		limit := 0.15 * h
+		if limit < 2 {
+			limit = 2
+		}
+		if gap > limit {
+			runs = append(runs, cur)
+			cur = textRun{Text: tk.Text, X: tk.X, W: tk.W, H: h}
+			continue
+		}
+		cur.Text += tk.Text
+		if end := tk.X + tk.W; end > cur.X+cur.W {
+			cur.W = end - cur.X
+		}
+		if h > cur.H {
+			cur.H = h
 		}
 	}
-
-	if needTokenNumeric {
-		for _, tok := range row.Tokens {
-			if !looksNumeric(tok.Text) {
-				continue
-			}
-			key, dist := nearestColumn(tok.X+tok.W/2, cols)
-			if key == "" || dist > 170 || !isNumericKey(key) {
-				continue
-			}
-			setItemNumber(&item, key, tok.Text)
-		}
+	if cur.Text != "" {
+		runs = append(runs, cur)
 	}
+	return runs
+}
 
-	item.Name = cleanItemName(strings.Join(names, " "))
-	item.Spec = strings.Join(specs, " ")
-	if item.Name == "" && item.Amount == nil {
-		return model.Item{}, false
+// joinRunText 拼接同一列的多段文字：两侧都是英文/数字时补空格，中文直接相接。
+func joinRunText(a, b string) string {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == "" {
+		return b
 	}
-	return item, true
+	if b == "" {
+		return a
+	}
+	ra, rb := []rune(a), []rune(b)
+	if isASCIIWord(ra[len(ra)-1]) && isASCIIWord(rb[0]) {
+		return a + " " + b
+	}
+	return a + b
+}
+
+func isASCIIWord(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 func nearestColumn(cx float64, cols map[string]float64) (string, float64) {
@@ -1063,7 +1163,7 @@ func postItem(it model.Item) model.Item {
 		it.Tax = &v
 	}
 	if it.Qty != nil && it.Price != nil && it.Amount != nil {
-		diff := *it.Qty * *it.Price - *it.Amount
+		diff := *it.Qty**it.Price - *it.Amount
 		if diff < 0 {
 			diff = -diff
 		}
@@ -1179,12 +1279,16 @@ func extractTravel(texts []string, flat string, kind string) map[string]any {
 }
 
 // ---------------------------------------------------------------- 表单建议
+// reTaxonomy 匹配发票品名前的税收分类编码，如 *电子元件*、*纸制品*。
+var reTaxonomy = regexp.MustCompile(`[*＊]([^*＊]{2,20})[*＊]`)
+
 var categoryRules = []struct {
 	Name string
 	Keys []string
 }{
 	{"办公用品", []string{"办公", "文具", "纸", "笔", "文件夹", "打印", "墨盒", "耗材", "资料"}},
-	{"电子设备", []string{"电脑", "显示器", "硬盘", "主板", "服务器", "键盘", "鼠标", "路由器", "电子", "芯片", "配件"}},
+	{"电子设备", []string{"电脑", "计算机", "显示器", "硬盘", "主板", "服务器", "键盘", "鼠标", "路由器",
+		"电子", "电池", "电路", "电线", "电缆", "芯片", "配件", "元器件", "模块", "变压器", "焊接", "摄像头", "网卡", "集线器"}},
 	{"软件服务", []string{"软件", "云服务", "saas", "订阅", "授权", "技术服务", "开发", "平台"}},
 	{"差旅交通", []string{"机票", "火车", "高铁", "动车", "打车", "出租", "网约车", "住宿", "酒店", "宾馆", "差旅", "客运"}},
 	{"餐饮招待", []string{"餐饮", "餐", "食品", "饮料", "招待", "咖啡", "茶"}},
@@ -1237,7 +1341,10 @@ func buildSuggest(kind string, fields map[string]model.Field, items []model.Item
 		}
 	}
 	if category == "" {
-		haystack := strings.ToLower(name + " " + item.Spec + " " + firstRunes(flat, 1200))
+		haystack := strings.ToLower(name + " " + item.Spec)
+		for _, m := range reTaxonomy.FindAllStringSubmatch(flat, -1) {
+			haystack += " " + strings.ToLower(m[1])
+		}
 		for _, rule := range categoryRules {
 			for _, k := range rule.Keys {
 				if strings.Contains(haystack, strings.ToLower(k)) {
@@ -1278,13 +1385,25 @@ func buildSuggest(kind string, fields map[string]model.Field, items []model.Item
 		return suggest
 	}
 
-	qty := item.Qty
+	var qty *float64
+	sumQty := 0.0
+	hasQty := false
+	for _, it := range items {
+		if it.Qty != nil {
+			sumQty += *it.Qty
+			hasQty = true
+		}
+	}
+	if hasQty && sumQty > 0 {
+		q := sumQty
+		qty = &q
+	}
 	unitPrice := item.Price
 	amount := item.Amount
 	if hasTotal {
 		amount = &totalVal
 		unitPrice = &totalVal
-		if qty != nil && *qty > 1 {
+		if qty != nil && *qty > 0 {
 			v := round2(totalVal / *qty)
 			unitPrice = &v
 		}
