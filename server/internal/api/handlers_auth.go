@@ -36,7 +36,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		"needs_setup": count == 0,
 		"user":        nil,
 		"settings":    publicSettings(),
-		"app":         map[string]string{"name": "票管家", "version": "1.0.0"},
+		"app":         map[string]string{"name": "票管家", "version": "1.0.1"},
 	}
 	if u, err := s.currentUser(r); err == nil {
 		payload["user"] = s.loadUserPublic(u.ID)

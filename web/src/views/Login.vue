@@ -28,7 +28,7 @@
         </div>
       </div>
 
-      <div class="auth-foot">票管家 v1.0.0 · Go + MySQL + Arco Design Vue · 构建 {{ buildTime }}</div>
+      <div class="auth-foot">票管家 v1.0.1 · Go + MySQL + Arco Design Vue · 构建 {{ buildTime }}</div>
     </aside>
 
     <main class="auth-main">
