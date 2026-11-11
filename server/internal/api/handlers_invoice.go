@@ -14,14 +14,13 @@ import (
 	"strings"
 	"time"
 
-	
 	"invoice/server/internal/model"
 	"invoice/server/internal/ocr"
 	"invoice/server/internal/storage"
 	"invoice/server/internal/store"
 )
 
-const invoiceSelect = `SELECT i.id, i.user_id, u.display_name, i.type, i.status, i.title, i.category, i.spec,
+const invoiceSelect = `SELECT i.id, i.user_id, u.display_name, i.type, i.status, i.title, i.category, i.spec, i.unit,
 i.link, i.qty, i.unit_price, i.shipping, i.amount, i.travel_time, i.transport, i.route, i.traveler,
 i.note, i.invoice_no, i.invoice_code, i.invoice_date, i.seller, i.buyer, i.tax, i.total,
 i.invoice_kind, i.ocr_engine, i.ocr_confidence, i.created_at, i.updated_at, i.reimbursed_at
@@ -37,7 +36,7 @@ func scanInvoice(s rowScanner) (model.Invoice, error) {
 	var created, updated time.Time
 	var reimbursed sql.NullTime
 	err := s.Scan(&inv.ID, &inv.UserID, &inv.DisplayName, &inv.Type, &inv.Status, &inv.Title, &inv.Category,
-		&inv.Spec, &inv.Link, &qty, &unitPrice, &shipping, &inv.Amount, &inv.TravelTime, &inv.Transport,
+		&inv.Spec, &inv.Unit, &inv.Link, &qty, &unitPrice, &shipping, &inv.Amount, &inv.TravelTime, &inv.Transport,
 		&inv.Route, &inv.Traveler, &inv.Note, &inv.InvoiceNo, &inv.InvoiceCode, &inv.InvoiceDate,
 		&inv.Seller, &inv.Buyer, &tax, &total, &inv.InvoiceKind, &inv.OCREngine, &inv.OCRConfidence,
 		&created, &updated, &reimbursed)
@@ -172,6 +171,7 @@ type createPayload struct {
 	Title      string   `json:"title"`
 	Category   string   `json:"category"`
 	Spec       string   `json:"spec"`
+	Unit       string   `json:"unit"`
 	Link       string   `json:"link"`
 	Qty        *float64 `json:"qty"`
 	UnitPrice  *float64 `json:"unit_price"`
@@ -228,13 +228,14 @@ func (s *Server) handleCreateInvoice(w http.ResponseWriter, r *http.Request) {
 		token, path, filename, mime string
 		size                        int64
 		sha                         string
+		parseJSON                   string
 	}
 	var uploads []pending
 	for _, token := range body.Uploads {
 		var up pending
 		up.token = token
-		err := store.DB.QueryRow("SELECT path, filename, mime, size, sha256 FROM pending_uploads WHERE token=? AND user_id=?",
-			token, user.ID).Scan(&up.path, &up.filename, &up.mime, &up.size, &up.sha)
+		err := store.DB.QueryRow("SELECT path, filename, mime, size, sha256, parse_json FROM pending_uploads WHERE token=? AND user_id=?",
+			token, user.ID).Scan(&up.path, &up.filename, &up.mime, &up.size, &up.sha, &up.parseJSON)
 		if err != nil {
 			errf(w, http.StatusBadRequest, "upload_expired", "附件已失效，请重新上传")
 			return
@@ -258,12 +259,26 @@ func (s *Server) handleCreateInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	shipping := floatValue(p.Shipping)
 
-	res, err := store.DB.Exec(`INSERT INTO invoices(user_id, type, status, title, category, spec, link, qty,
+	// 单位不在表单里编辑：优先取提交值，否则从上传时保存的识别结果里取第一行明细的单位。
+	unit := clampString(p.Unit, 16)
+	if unit == "" {
+		for _, up := range uploads {
+			var parsed model.ParseResult
+			if json.Unmarshal([]byte(up.parseJSON), &parsed) == nil && len(parsed.Items) > 0 {
+				unit = clampString(parsed.Items[0].Unit, 16)
+				if unit != "" {
+					break
+				}
+			}
+		}
+	}
+
+	res, err := store.DB.Exec(`INSERT INTO invoices(user_id, type, status, title, category, spec, unit, link, qty,
 		unit_price, shipping, amount, travel_time, transport, route, traveler, note, invoice_no, invoice_code,
 		invoice_date, seller, buyer, tax, total, invoice_kind, ocr_engine, ocr_confidence, fields_json,
 		source_text, created_at, updated_at)
-		VALUES(?,?,'pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		user.ID, p.Type, title, clampString(p.Category, 40), clampString(p.Spec, 120), clampString(p.Link, 500),
+		VALUES(?,?,'pending',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		user.ID, p.Type, title, clampString(p.Category, 40), clampString(p.Spec, 120), unit, clampString(p.Link, 500),
 		p.Qty, p.UnitPrice, shipping, amount, clampString(p.TravelTime, 40), clampString(p.Transport, 20),
 		clampString(p.Route, 120), clampString(p.Traveler, 40), clampString(p.Note, 2000),
 		clampString(p.Meta.InvoiceNo, 40), "", clampString(p.Meta.InvoiceDate, 20), clampString(p.Meta.Seller, 200),
@@ -458,7 +473,7 @@ func (s *Server) handleUpdateInvoice(w http.ResponseWriter, r *http.Request) {
 			sets = append(sets, "reimbursed_at=NULL", "reimbursed_by=NULL")
 		}
 	}
-	textFields := map[string]int{"title": 120, "category": 40, "spec": 120, "link": 500,
+	textFields := map[string]int{"title": 120, "category": 40, "spec": 120, "unit": 16, "link": 500,
 		"travel_time": 40, "transport": 20, "route": 120, "traveler": 40, "note": 2000}
 	for k, limit := range textFields {
 		if v, ok := body[k].(string); ok {
@@ -725,5 +740,3 @@ func urlEncode(s string) string {
 	}
 	return sb.String()
 }
-
-

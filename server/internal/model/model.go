@@ -45,6 +45,7 @@ type Invoice struct {
 	Title         string     `json:"title"`
 	Category      string     `json:"category"`
 	Spec          string     `json:"spec"`
+	Unit          string     `json:"unit"`
 	Link          string     `json:"link"`
 	Qty           *float64   `json:"qty"`
 	UnitPrice     *float64   `json:"unit_price"`
@@ -102,19 +103,19 @@ type Item struct {
 
 // ParseResult 离线识别的完整结果。
 type ParseResult struct {
-	Kind         string           `json:"kind"`
-	KindLabel    string           `json:"kind_label"`
-	SuggestType  string           `json:"suggest_type"`
-	Fields       map[string]Field `json:"fields"`
-	Items        []Item           `json:"items"`
-	Travel       map[string]any   `json:"travel"`
-	Suggest      map[string]any   `json:"suggest"`
-	Warnings     []string         `json:"warnings"`
-	RawText      string           `json:"raw_text"`
-	Engine       string           `json:"engine"`
-	Pages        int              `json:"pages"`
-	ElapsedMS    int64            `json:"elapsed_ms"`
-	Confidence   float64          `json:"confidence"`
-	FileName     string           `json:"filename"`
-	TokenCount   int              `json:"token_count"`
+	Kind        string           `json:"kind"`
+	KindLabel   string           `json:"kind_label"`
+	SuggestType string           `json:"suggest_type"`
+	Fields      map[string]Field `json:"fields"`
+	Items       []Item           `json:"items"`
+	Travel      map[string]any   `json:"travel"`
+	Suggest     map[string]any   `json:"suggest"`
+	Warnings    []string         `json:"warnings"`
+	RawText     string           `json:"raw_text"`
+	Engine      string           `json:"engine"`
+	Pages       int              `json:"pages"`
+	ElapsedMS   int64            `json:"elapsed_ms"`
+	Confidence  float64          `json:"confidence"`
+	FileName    string           `json:"filename"`
+	TokenCount  int              `json:"token_count"`
 }

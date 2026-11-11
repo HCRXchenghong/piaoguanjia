@@ -52,10 +52,10 @@ type PDFImage struct {
 
 // PDFText 提取结果。
 type PDFText struct {
-	Pages      int
-	Segments   []Segment
-	PageTexts  []string
-	Text       string
+	Pages     int
+	Segments  []Segment
+	PageTexts []string
+	Text      string
 }
 
 var objHeaderRe = regexp.MustCompile(`(?m)(?:^|[\r\n\s])(\d+)\s+(\d+)\s+obj\b`)
@@ -356,11 +356,13 @@ func (p *PDF) pageContent(page pdfPage) []byte {
 	if contents == nil {
 		return nil
 	}
+	// /Contents 可能直接是流，也可能是指向「流数组」的引用（常见于模板生成的发票）。
+	// 必须先 resolve，否则会把数组对象当成流去解码，整个页面文字都会丢失。
 	var refs []any
-	if r, ok := contents.(pdfRef); ok {
-		refs = []any{r}
-	} else if arr, ok := p.resolve(contents).([]any); ok {
+	if arr, ok := p.resolve(contents).([]any); ok {
 		refs = arr
+	} else if r, ok := contents.(pdfRef); ok {
+		refs = []any{r}
 	} else {
 		refs = []any{contents}
 	}
@@ -1180,4 +1182,6 @@ func ExtractTextBytes(data []byte) (*PDFText, error) {
 	return doc.ExtractText(), nil
 }
 
-func (t *PDFText) String() string { return fmt.Sprintf("%d pages, %d segments", t.Pages, len(t.Segments)) }
+func (t *PDFText) String() string {
+	return fmt.Sprintf("%d pages, %d segments", t.Pages, len(t.Segments))
+}

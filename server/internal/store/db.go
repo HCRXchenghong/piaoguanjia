@@ -1,4 +1,4 @@
-﻿package store
+package store
 
 import (
 	"database/sql"
@@ -22,16 +22,16 @@ var DB *sql.DB
 
 // 默认设置项。
 var defaults = map[string]string{
-	"org_name":         "我的团队",
-	"currency":         "CNY",
-	"retention_mode":   "permanent",
-	"retention_days":   "365",
-	"retention_scope":  "files",
-	"max_upload_mb":    "20",
-	"allowed_exts":     "pdf,jpg,jpeg,png,webp,bmp",
-	"categories":       "办公用品,电子设备,软件服务,差旅交通,餐饮招待,通讯网络,物流运输,其他",
-	"ocr_engine":       "auto",
-	"default_type":     "procurement",
+	"org_name":          "我的团队",
+	"currency":          "CNY",
+	"retention_mode":    "permanent",
+	"retention_days":    "365",
+	"retention_scope":   "files",
+	"max_upload_mb":     "20",
+	"allowed_exts":      "pdf,jpg,jpeg,png,webp,bmp",
+	"categories":        "办公用品,电子设备,软件服务,差旅交通,餐饮招待,通讯网络,物流运输,其他",
+	"ocr_engine":        "auto",
+	"default_type":      "procurement",
 	"reimbursed_notice": "",
 }
 
@@ -63,11 +63,30 @@ func Open(dsn string) error {
 			return fmt.Errorf("建表失败: %w\nSQL: %s", err, stmt)
 		}
 	}
+	// 老库补列：CREATE TABLE IF NOT EXISTS 不会给已存在的表加字段。
+	if err := ensureColumn("invoices", "unit", "VARCHAR(16) NOT NULL DEFAULT '' AFTER spec"); err != nil {
+		return fmt.Errorf("升级表结构失败: %w", err)
+	}
 	if err := seedSettings(); err != nil {
 		return err
 	}
 	log.Printf("数据库就绪")
 	return nil
+}
+
+// ensureColumn 幂等地给已有表补列。
+func ensureColumn(table, column, ddl string) error {
+	var n int
+	err := DB.QueryRow(`SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema=DATABASE() AND table_name=? AND column_name=?`, table, column).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err = DB.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `%s` %s", table, column, ddl))
+	return err
 }
 
 func splitStatements(sqlText string) []string {

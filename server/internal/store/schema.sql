@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   title          VARCHAR(200) NOT NULL DEFAULT '',
   category       VARCHAR(64)  NOT NULL DEFAULT '',
   spec           VARCHAR(200) NOT NULL DEFAULT '',
+  unit           VARCHAR(16)  NOT NULL DEFAULT '',
   link           VARCHAR(500) NOT NULL DEFAULT '',
   qty            DECIMAL(12,2) NULL,
   unit_price     DECIMAL(12,2) NULL,
