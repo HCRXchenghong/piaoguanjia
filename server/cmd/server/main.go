@@ -91,7 +91,7 @@ func banner(cfg *config.Config) {
 	ip := localIP()
 	line := "────────────────────────────────────────────────────────"
 	fmt.Printf("\n  %s\n", line)
-	fmt.Println("   票管家 · 发票报销管理平台  v1.0.1")
+	fmt.Println("   票管家 · 发票报销管理平台  v1.1.0")
 	fmt.Printf("  %s\n", line)
 	fmt.Printf("   本机访问 :  http://127.0.0.1%s\n", portSuffix(cfg.Addr))
 	fmt.Printf("   局域网   :  http://%s%s\n", ip, portSuffix(cfg.Addr))
